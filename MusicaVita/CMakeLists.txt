@@ -22,29 +22,31 @@ add_executable(${PROJECT_NAME}.elf
   src/deps/stb_vorbis.c
 )
 
-# Bibliotecas: usa as que existirem nesta versao do VitaSDK (a lista varia um pouco entre versoes).
-set(MV_LIBS vita2d)
-set(MV_CANDIDATES
-  SceDisplay_stub SceGxm_stub SceSysmodule_stub SceCtrl_stub ScePgf_stub ScePvf_stub SceCommonDialog_stub
-  SceAudio_stub ScePower_stub SceLibKernel_stub SceThreadmgr_stub SceProcessmgr_stub SceIofilemgr_stub
-  freetype png bz2 brotlidec brotlicommon jpeg webp sharpyuv z)
-set(MV_FOUND 0)
-foreach(lib ${MV_CANDIDATES})
+# O vita2d novo precisa de varias bibliotecas "stub" do sistema (inclusive SceSharedFb).
+# Em vez de listar uma a uma, ligamos todas as que existem no VitaSDK (so as usadas entram no programa).
+file(GLOB MV_STUB_FILES "$ENV{VITASDK}/arm-vita-eabi/lib/libSce*_stub.a")
+set(MV_STUBS "")
+foreach(f ${MV_STUB_FILES})
+  get_filename_component(n "${f}" NAME_WE)
+  string(REGEX REPLACE "^lib" "" n "${n}")
+  list(APPEND MV_STUBS "${n}")
+endforeach()
+
+# Bibliotecas de imagem/fonte que o vita2d usa (so as que existirem nesta versao do VitaSDK).
+set(MV_EXTRA "")
+foreach(lib freetype png bz2 brotlidec brotlicommon jpeg webp sharpyuv z)
   find_library(MVLIB_${lib} NAMES ${lib})
   if(MVLIB_${lib})
-    list(APPEND MV_LIBS ${lib})
-    math(EXPR MV_FOUND "${MV_FOUND}+1")
+    list(APPEND MV_EXTRA ${lib})
   endif()
 endforeach()
-if(MV_FOUND LESS 8)
-  message(STATUS "find_library nao localizou as bibliotecas; usando a lista padrao")
-  set(MV_LIBS vita2d SceDisplay_stub SceGxm_stub SceSysmodule_stub SceCtrl_stub ScePgf_stub ScePvf_stub
-      SceCommonDialog_stub SceAudio_stub ScePower_stub SceLibKernel_stub SceProcessmgr_stub freetype png jpeg z)
+if(NOT MV_EXTRA)
+  set(MV_EXTRA freetype png jpeg z)
 endif()
-list(APPEND MV_LIBS m c)
-message(STATUS "Bibliotecas: ${MV_LIBS}")
+message(STATUS "Stubs encontrados: ${MV_STUBS}")
+message(STATUS "Extras: ${MV_EXTRA}")
 
-target_link_libraries(${PROJECT_NAME}.elf ${MV_LIBS})
+target_link_libraries(${PROJECT_NAME}.elf vita2d ${MV_STUBS} ${MV_EXTRA} m c)
 
 vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME}.elf)
 vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
