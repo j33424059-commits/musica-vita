@@ -29,7 +29,10 @@ set(MV_STUBS "")
 foreach(f ${MV_STUB_FILES})
   get_filename_component(n "${f}" NAME_WE)
   string(REGEX REPLACE "^lib" "" n "${n}")
-  list(APPEND MV_STUBS "${n}")
+  # SceLibc/SceLibm/SceLibstdcxx repetem funcoes que o VitaSDK ja tem (fclose etc.) e dao conflito
+  if(NOT n MATCHES "^(SceLibc|SceLibm|SceLibstdcxx)")
+    list(APPEND MV_STUBS "${n}")
+  endif()
 endforeach()
 
 # Bibliotecas de imagem/fonte que o vita2d usa (so as que existirem nesta versao do VitaSDK).
