@@ -22,16 +22,19 @@ add_executable(${PROJECT_NAME}.elf
   src/deps/stb_vorbis.c
 )
 
-# O vita2d novo precisa de varias bibliotecas "stub" do sistema (inclusive SceSharedFb).
-# Em vez de listar uma a uma, ligamos todas as que existem no VitaSDK (so as usadas entram no programa).
-file(GLOB MV_STUB_FILES "$ENV{VITASDK}/arm-vita-eabi/lib/libSce*_stub.a")
+# Lista explicita das bibliotecas "stub" do sistema que o app realmente usa
+# (vita2d, audio, controle, arquivos, threads, energia).
+# So entram as que existirem nesta versao do VitaSDK.
+set(MV_STUB_NAMES
+  SceDisplay SceGxm SceSysmodule SceCtrl ScePgf ScePvf SceCommonDialog
+  SceAudio SceAppUtil SceAppMgr SceSharedFb
+  SceLibKernel SceThreadmgr SceIofilemgr SceProcessmgr SceSysmem
+  ScePower
+)
 set(MV_STUBS "")
-foreach(f ${MV_STUB_FILES})
-  get_filename_component(n "${f}" NAME_WE)
-  string(REGEX REPLACE "^lib" "" n "${n}")
-  # SceLibc/SceLibm/SceLibstdcxx repetem funcoes que o VitaSDK ja tem (fclose etc.) e dao conflito
-  if(NOT n MATCHES "^(SceLibc|SceLibm|SceLibstdcxx)")
-    list(APPEND MV_STUBS "${n}")
+foreach(n ${MV_STUB_NAMES})
+  if(EXISTS "$ENV{VITASDK}/arm-vita-eabi/lib/lib${n}_stub.a")
+    list(APPEND MV_STUBS "${n}_stub")
   endif()
 endforeach()
 
@@ -46,7 +49,7 @@ endforeach()
 if(NOT MV_EXTRA)
   set(MV_EXTRA freetype png jpeg z)
 endif()
-message(STATUS "Stubs encontrados: ${MV_STUBS}")
+message(STATUS "Stubs usados: ${MV_STUBS}")
 message(STATUS "Extras: ${MV_EXTRA}")
 
 target_link_libraries(${PROJECT_NAME}.elf vita2d ${MV_STUBS} ${MV_EXTRA} m c)
