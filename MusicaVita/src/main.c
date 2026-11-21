@@ -1,10 +1,12 @@
 /*
  * Música Vita - player de músicas para PS Vita (MP3, OGG, FLAC, WAV)
  * Pasta das músicas: ux0:/data/music (também procura em ux0:/music e uma memória uma0:)
+ * Controles: botões físicos e tela de toque.
  */
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/ctrl.h>
+#include <psp2/touch.h>
 #include <psp2/audioout.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
@@ -32,19 +34,9 @@
 #define OUT_RATE 48000
 #define GRAIN 1024
 #define MAX_TRACKS 5000
-#define SRC_CHUNK 4096
+#define SRC_CHUNK 1152   /* menor = decodificação distribuída, sem "engasgos" */
 
 unsigned int _newlib_heap_size_user = 64 * 1024 * 1024;
-
-/* grava um log simples em ux0:/data/musicavita_log.txt */
-static void logmsg(const char *s) {
-    SceUID f = sceIoOpen("ux0:/data/musicavita_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
-    if (f >= 0) {
-        sceIoWrite(f, s, strlen(s));
-        sceIoWrite(f, "\n", 1);
-        sceIoClose(f);
-    }
-}
 
 /* ------------------------------------------------------------------ */
 /* Lista de músicas                                                     */
@@ -216,14 +208,11 @@ static int16_t outbuf[GRAIN * 2] __attribute__((aligned(64)));
 static int audio_thread(SceSize args, void *argp) {
     (void)args;
     (void)argp;
-    logmsg("A1: thread de audio rodando");
     int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
     if (port < 0) {
-        logmsg("A2: ERRO ao abrir porta de audio");
         a_port_err = 1;
         return 0;
     }
-    logmsg("A2: porta de audio ok");
     int vols[2] = {32768, 32768};
     sceAudioOutSetVolume(port, 3, vols);
 
@@ -245,7 +234,6 @@ static int audio_thread(SceSize args, void *argp) {
             a_ended = 0;
             a_fail = 0;
             if (idx < ntracks && dec_open(&dec, tracks[idx].path)) {
-                logmsg("A3: faixa aberta");
                 open = 1;
                 eof = 0;
                 sn = 0;
@@ -255,7 +243,6 @@ static int audio_thread(SceSize args, void *argp) {
                 a_total = dec.total;
                 a_playing = 1;
             } else {
-                logmsg("A3: FALHA ao abrir faixa");
                 a_fail = 1;
             }
         }
@@ -333,6 +320,7 @@ static vita2d_pgf *pgf = NULL;
 #define C_DIM     RGBA8(142, 142, 147, 255)
 #define C_ACCENT  RGBA8(10, 132, 255, 255)
 #define C_TRACK   RGBA8(72, 72, 74, 255)
+#define C_BTN     RGBA8(68, 68, 72, 255)
 
 static void draw_text(int x, int y, unsigned int color, float scale, const char *s) {
     if (!pgf) return;
@@ -375,9 +363,36 @@ static int shuffle_on = 0, repeat_mode = 0; /* 0 desligado, 1 todas, 2 uma */
 static int screen_off = 0;
 static int fail_streak = 0;
 
-#define ROWS 11
+#define ROWS 9
 #define ROW_H 32
 #define LIST_Y 72
+
+#define PANEL_Y 372
+#define BAR_X 32
+#define BAR_W 896
+#define BAR_Y 414
+#define BTN_Y 456
+#define BTN_H 52
+#define BTN_W 120
+#define BTN_GAP 16
+#define BTN_X0 148
+
+enum { B_PREV, B_PLAY, B_NEXT, B_SHUF, B_REP, B_COUNT };
+
+static void btn_rect(int i, int *x, int *y, int *w, int *h) {
+    *x = BTN_X0 + i * (BTN_W + BTN_GAP);
+    *y = BTN_Y;
+    *w = BTN_W;
+    *h = BTN_H;
+}
+
+static void draw_button(int i, const char *label, int active, float scale) {
+    int x, y, w, h;
+    btn_rect(i, &x, &y, &w, &h);
+    vita2d_draw_rectangle(x, y, w, h, active ? C_ACCENT : C_BTN);
+    int tw = text_w(scale, label);
+    draw_text(x + (w - tw) / 2, y + h / 2 + 7, C_TEXT, scale, label);
+}
 
 static void draw_ui(void) {
     char buf[320], tmp[320];
@@ -413,28 +428,25 @@ static void draw_ui(void) {
         }
     }
 
-    /* painel "tocando agora" */
-    vita2d_draw_rectangle(0, 436, 960, 108, C_PANEL);
+    /* painel "tocando agora" + botões de toque (sempre visível) */
+    vita2d_draw_rectangle(0, PANEL_Y, 960, 544 - PANEL_Y, C_PANEL);
     if (a_port_err) {
-        draw_text(32, 478, RGBA8(255, 69, 58, 255), 1.0f, "Não foi possível abrir a saída de áudio.");
+        draw_text(32, 400, RGBA8(255, 69, 58, 255), 1.0f, "Não foi possível abrir a saída de áudio.");
     } else if (cur >= 0 && cur < ntracks) {
         fit_name(tracks[cur].name, 1.05f, 640, buf, sizeof(buf));
-        draw_text(32, 466, C_TEXT, 1.05f, buf);
-        snprintf(tmp, sizeof(tmp), "%s  |  Aleatório: %s  |  Repetir: %s",
-                 paused ? "Pausado" : (a_playing ? "Tocando" : "Parado"),
-                 shuffle_on ? "sim" : "não",
-                 repeat_mode == 0 ? "não" : (repeat_mode == 1 ? "todas" : "uma"));
-        draw_text(928 - text_w(0.8f, tmp), 462, C_DIM, 0.8f, tmp);
+        draw_text(32, 400, C_TEXT, 1.05f, buf);
+        snprintf(tmp, sizeof(tmp), "%s", paused ? "Pausado" : (a_playing ? "Tocando" : "Parado"));
+        draw_text(928 - text_w(0.85f, tmp), 396, C_DIM, 0.85f, tmp);
 
         uint32_t rate = a_rate ? a_rate : 1;
         int el = (int)(a_played / rate);
         uint64_t total = a_total;
-        vita2d_draw_rectangle(32, 478, 896, 6, C_TRACK);
+        vita2d_draw_rectangle(BAR_X, BAR_Y, BAR_W, 8, C_TRACK);
         if (total > 0) {
-            int w = (int)(896.0 * (double)a_played / (double)total);
+            int w = (int)((double)BAR_W * (double)a_played / (double)total);
             if (w < 0) w = 0;
-            if (w > 896) w = 896;
-            vita2d_draw_rectangle(32, 478, w, 6, C_ACCENT);
+            if (w > BAR_W) w = BAR_W;
+            vita2d_draw_rectangle(BAR_X, BAR_Y, w, 8, C_ACCENT);
             char t1[16], t2[16];
             fmt_time(el, t1, sizeof(t1));
             fmt_time((int)(total / rate), t2, sizeof(t2));
@@ -442,12 +454,20 @@ static void draw_ui(void) {
         } else {
             fmt_time(el, buf, sizeof(buf));
         }
-        draw_text(32, 506, C_DIM, 0.85f, buf);
+        draw_text(32, 444, C_DIM, 0.85f, buf);
     } else {
-        draw_text(32, 470, C_DIM, 1.0f, "Escolha uma música e aperte X.");
+        draw_text(32, 400, C_DIM, 1.0f, "Toque numa música (ou aperte X) para tocar.");
+        vita2d_draw_rectangle(BAR_X, BAR_Y, BAR_W, 8, C_TRACK);
     }
-    draw_text(32, 532, C_DIM, 0.72f,
-              "X Tocar   O Pausar   L/R Faixa   Esq/Dir 10s   Quadrado Aleatório   Triângulo Repetir   SELECT Tela   START Sair");
+
+    draw_button(B_PREV, "Anterior", 0, 0.9f);
+    draw_button(B_PLAY, (paused || !a_playing) ? "Tocar" : "Pausar", 0, 0.9f);
+    draw_button(B_NEXT, "Próxima", 0, 0.9f);
+    draw_button(B_SHUF, shuffle_on ? "Aleatório: sim" : "Aleatório", shuffle_on, 0.8f);
+    draw_button(B_REP, repeat_mode == 0 ? "Repetir" : (repeat_mode == 1 ? "Repetir: todas" : "Repetir: uma"), repeat_mode != 0, 0.8f);
+
+    draw_text(32, 534, C_DIM, 0.7f,
+              "Toque na lista para tocar, arraste para rolar, toque na barra para avançar.   SELECT Tela   START Sair");
 
     vita2d_end_drawing();
     vita2d_swap_buffers();
@@ -456,11 +476,24 @@ static void draw_ui(void) {
 /* ------------------------------------------------------------------ */
 /* Controle                                                             */
 /* ------------------------------------------------------------------ */
+static void keep_sel_visible(void) {
+    if (sel < top) top = sel;
+    if (sel >= top + ROWS) top = sel - ROWS + 1;
+    if (top < 0) top = 0;
+}
+
+static void clamp_top(void) {
+    int maxtop = ntracks - ROWS;
+    if (maxtop < 0) maxtop = 0;
+    if (top > maxtop) top = maxtop;
+    if (top < 0) top = 0;
+}
+
 static void play_index(int i) {
     if (i < 0 || i >= ntracks) return;
-    logmsg(tracks[i].path);
     cur = i;
     sel = i;
+    keep_sel_visible();
     paused = 0;
     a_ended = 0;
     a_fail = 0;
@@ -487,17 +520,83 @@ static int next_index(int dir, int automatic) {
     return n;
 }
 
-static void keep_sel_visible(void) {
-    if (sel < top) top = sel;
-    if (sel >= top + ROWS) top = sel - ROWS + 1;
-    if (top < 0) top = 0;
+static void do_next(void) {
+    int n = next_index(1, 0);
+    if (n >= 0) play_index(n);
+}
+
+static void do_prev(void) {
+    /* se já passou de 3 s, volta ao início; senão, faixa anterior */
+    if (cur >= 0 && a_rate && (a_played / a_rate) > 3) {
+        req_seek_s = 0;
+    } else {
+        int n = next_index(-1, 0);
+        if (n >= 0) play_index(n);
+    }
+}
+
+static void do_play_pause(void) {
+    if (cur < 0) {
+        play_index(sel);
+    } else if (a_playing || paused) {
+        paused = !paused;
+    } else {
+        play_index(cur); /* parado: toca de novo */
+    }
+}
+
+static void do_seek_rel(int secs) {
+    if (cur < 0 || !a_rate) return;
+    int el = (int)(a_played / a_rate);
+    int target = el + secs;
+    if (target < 0) target = 0;
+    req_seek_s = target;
+}
+
+static void handle_tap(int x, int y) {
+    /* lista */
+    if (y >= LIST_Y && y < LIST_Y + ROWS * ROW_H && x < 940) {
+        int i = top + (y - LIST_Y) / ROW_H;
+        if (i >= 0 && i < ntracks) play_index(i);
+        return;
+    }
+    /* barra de progresso */
+    if (y >= BAR_Y - 14 && y <= BAR_Y + 22 && x >= BAR_X && x <= BAR_X + BAR_W) {
+        if (cur >= 0 && a_total > 0 && a_rate) {
+            double frac = (double)(x - BAR_X) / (double)BAR_W;
+            if (frac < 0) frac = 0;
+            if (frac > 1) frac = 1;
+            req_seek_s = (int)(frac * (double)a_total / (double)a_rate);
+        }
+        return;
+    }
+    /* botões */
+    for (int i = 0; i < B_COUNT; i++) {
+        int bx, by, bw, bh;
+        btn_rect(i, &bx, &by, &bw, &bh);
+        if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+            switch (i) {
+                case B_PREV: do_prev(); break;
+                case B_PLAY: do_play_pause(); break;
+                case B_NEXT: do_next(); break;
+                case B_SHUF: shuffle_on = !shuffle_on; break;
+                case B_REP: repeat_mode = (repeat_mode + 1) % 3; break;
+            }
+            return;
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
-    logmsg("1: inicio");
     srand((unsigned)sceKernelGetProcessTimeLow());
+
+    /* clock maior = decodificação mais folgada (menos "picotes") */
+    scePowerSetArmClockFrequency(444);
+    scePowerSetBusClockFrequency(222);
+    scePowerSetGpuClockFrequency(222);
+    scePowerSetGpuXbarClockFrequency(166);
 
     sceIoMkdir("ux0:/data/music", 0777);
     scan_dir("ux0:/data/music", 0);
@@ -505,23 +604,24 @@ int main(int argc, char *argv[]) {
     scan_dir("uma0:/data/music", 0);
     scan_dir("uma0:/music", 0);
     if (ntracks > 1) qsort(tracks, ntracks, sizeof(Track), cmp_track);
-    logmsg("2: pastas lidas");
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
     vita2d_init();
-    logmsg("3: vita2d ok");
     vita2d_set_clear_color(C_BG);
     pgf = vita2d_load_default_pgf();
-    logmsg(pgf ? "4: fonte ok" : "4: FONTE NULL");
 
-    SceUID th = sceKernelCreateThread("audio", audio_thread, 0x10000100, 0x40000, 0, 0, NULL);
+    /* prioridade mais alta que a thread principal para o áudio não falhar */
+    SceUID th = sceKernelCreateThread("audio", audio_thread, 0x60, 0x40000, 0, 0, NULL);
     if (th >= 0) sceKernelStartThread(th, 0, NULL);
-    logmsg("5: thread de audio iniciada");
 
     SceCtrlData pad, old;
     memset(&pad, 0, sizeof(pad));
     memset(&old, 0, sizeof(old));
+    SceTouchData touch;
+    memset(&touch, 0, sizeof(touch));
     int hold_up = 0, hold_down = 0;
+    int t_down = 0, t_moved = 0, t_sx = 0, t_sy = 0, t_ly = 0, t_acc = 0;
 
     while (!quit_flag) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
@@ -542,32 +642,49 @@ int main(int argc, char *argv[]) {
         if ((pressed & SCE_CTRL_CIRCLE) && cur >= 0 && (a_playing || paused)) paused = !paused;
         if (pressed & SCE_CTRL_SQUARE) shuffle_on = !shuffle_on;
         if (pressed & SCE_CTRL_TRIANGLE) repeat_mode = (repeat_mode + 1) % 3;
-        if (pressed & SCE_CTRL_RTRIGGER) {
-            int n = next_index(1, 0);
-            if (n >= 0) play_index(n);
-        }
-        if (pressed & SCE_CTRL_LTRIGGER) {
-            /* se já passou de 3 s, volta ao início; senão, faixa anterior */
-            if (cur >= 0 && a_rate && (a_played / a_rate) > 3) {
-                req_seek_s = 0;
-            } else {
-                int n = next_index(-1, 0);
-                if (n >= 0) play_index(n);
-            }
-        }
-        if ((pressed & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && cur >= 0 && a_rate) {
-            int el = (int)(a_played / a_rate);
-            int target = el + ((pressed & SCE_CTRL_RIGHT) ? 10 : -10);
-            if (target < 0) target = 0;
-            req_seek_s = target;
-        }
+        if (pressed & SCE_CTRL_RTRIGGER) do_next();
+        if (pressed & SCE_CTRL_LTRIGGER) do_prev();
+        if (pressed & SCE_CTRL_RIGHT) do_seek_rel(10);
+        if (pressed & SCE_CTRL_LEFT) do_seek_rel(-10);
 
         /* navegação na lista, com repetição ao segurar */
+        int prev_sel = sel;
         if (pad.buttons & SCE_CTRL_UP) hold_up++; else hold_up = 0;
         if (pad.buttons & SCE_CTRL_DOWN) hold_down++; else hold_down = 0;
         if (hold_up == 1 || (hold_up > 20 && hold_up % 4 == 0)) { if (sel > 0) sel--; }
         if (hold_down == 1 || (hold_down > 20 && hold_down % 4 == 0)) { if (sel < ntracks - 1) sel++; }
-        keep_sel_visible();
+        if (sel != prev_sel) keep_sel_visible();
+
+        /* tela de toque (ignorada com a tela desligada, para evitar toques acidentais) */
+        if (!screen_off) {
+            sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
+            if (touch.reportNum > 0) {
+                int tx = touch.report[0].x / 2;
+                int ty = touch.report[0].y / 2;
+                if (!t_down) {
+                    t_down = 1;
+                    t_moved = 0;
+                    t_sx = tx;
+                    t_sy = ty;
+                    t_ly = ty;
+                    t_acc = 0;
+                } else {
+                    if (abs(tx - t_sx) > 12 || abs(ty - t_sy) > 12) t_moved = 1;
+                    if (t_moved && t_sy >= LIST_Y && t_sy < LIST_Y + ROWS * ROW_H) {
+                        t_acc += ty - t_ly;
+                        while (t_acc >= ROW_H) { top--; t_acc -= ROW_H; }
+                        while (t_acc <= -ROW_H) { top++; t_acc += ROW_H; }
+                        clamp_top();
+                    }
+                    t_ly = ty;
+                }
+            } else if (t_down) {
+                t_down = 0;
+                if (!t_moved) handle_tap(t_sx, t_sy);
+            }
+        } else {
+            t_down = 0;
+        }
 
         /* fim de faixa / falha ao abrir */
         if (a_ended) {
