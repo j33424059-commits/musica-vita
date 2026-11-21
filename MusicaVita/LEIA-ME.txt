@@ -1,0 +1,45 @@
+MÚSICA VITA - player de músicas para PS Vita (MP3, OGG, FLAC e WAV)
+====================================================================
+
+COMO GERAR O VPK (sem instalar nada no PC, usando o GitHub de graça)
+--------------------------------------------------------------------
+1. Crie uma conta gratuita em https://github.com (se ainda não tiver).
+2. Clique em "+" (canto superior direito) > "New repository". Dê um nome (ex.: musica-vita),
+   marque "Add a README file" e clique em "Create repository".
+3. Na página do repositório: "Add file" > "Upload files".
+4. Abra a pasta "MusicaVita" que você extraiu do ZIP e ARRASTE TUDO que está dentro dela
+   (as pastas .github, sce_sys, src e os arquivos CMakeLists.txt e LEIA-ME.txt) para a janela do navegador.
+   Use o Chrome ou o Edge. Espere terminar de enviar e clique em "Commit changes".
+5. Clique na aba "Actions". O fluxo "Compilar VPK" começa sozinho. Aguarde de 2 a 5 minutos.
+   - Bolinha verde = deu certo. Clique no nome da execução e, no fim da página, em "Artifacts",
+     baixe "MusicaVita-VPK" (é um ZIP que contém o arquivo MusicaVita.vpk).
+   - X vermelho = falhou. Clique na execução > "build" > abra a etapa que falhou e copie
+     as últimas linhas do texto para me enviar.
+
+COMO INSTALAR NO VITA
+---------------------
+1. Copie o MusicaVita.vpk para o Vita (VitaShell por USB ou FTP) e instale pelo VitaShell.
+2. Coloque suas músicas na pasta   ux0:/data/music   (pode ter subpastas).
+   Também são lidas ux0:/music e uma memória em uma0:.
+3. Abra o aplicativo "Musica Vita".
+
+CONTROLES
+---------
+Cima/Baixo ........ escolher a música (segure para rolar rápido)
+X ................. tocar a música escolhida
+O ................. pausar / continuar
+L / R ............. faixa anterior (ou volta ao início) / próxima faixa
+Esquerda/Direita .. voltar / avançar 10 segundos
+Quadrado .......... aleatório ligado/desligado
+Triângulo ......... repetir: desligado / todas / uma
+SELECT ............ liga/desliga a tela (a música continua tocando e poupa bateria)
+START ............. sair
+O volume é o dos botões de volume do próprio Vita.
+
+OBSERVAÇÕES
+-----------
+- Ao apertar o botão PS e abrir outro jogo, o Vita suspende este aplicativo e a música para.
+  Para ouvir com a tela apagada, use o botão SELECT do próprio aplicativo (não o botão de energia).
+- O tempo total só aparece para FLAC, OGG e WAV. Em MP3 mostra só o tempo decorrido.
+- Avançar/voltar em MP3 muito longos pode demorar alguns segundos.
+- Nomes de arquivo com caracteres especiais podem aparecer com falhas na fonte do sistema.
