@@ -34,6 +34,18 @@
 #define MAX_TRACKS 5000
 #define SRC_CHUNK 4096
 
+unsigned int _newlib_heap_size_user = 64 * 1024 * 1024;
+
+/* grava um log simples em ux0:/data/musicavita_log.txt */
+static void logmsg(const char *s) {
+    SceUID f = sceIoOpen("ux0:/data/musicavita_log.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0777);
+    if (f >= 0) {
+        sceIoWrite(f, s, strlen(s));
+        sceIoWrite(f, "\n", 1);
+        sceIoClose(f);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Lista de músicas                                                     */
 /* ------------------------------------------------------------------ */
@@ -204,11 +216,14 @@ static int16_t outbuf[GRAIN * 2] __attribute__((aligned(64)));
 static int audio_thread(SceSize args, void *argp) {
     (void)args;
     (void)argp;
+    logmsg("A1: thread de audio rodando");
     int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
     if (port < 0) {
+        logmsg("A2: ERRO ao abrir porta de audio");
         a_port_err = 1;
         return 0;
     }
+    logmsg("A2: porta de audio ok");
     int vols[2] = {32768, 32768};
     sceAudioOutSetVolume(port, 3, vols);
 
@@ -230,6 +245,7 @@ static int audio_thread(SceSize args, void *argp) {
             a_ended = 0;
             a_fail = 0;
             if (idx < ntracks && dec_open(&dec, tracks[idx].path)) {
+                logmsg("A3: faixa aberta");
                 open = 1;
                 eof = 0;
                 sn = 0;
@@ -239,6 +255,7 @@ static int audio_thread(SceSize args, void *argp) {
                 a_total = dec.total;
                 a_playing = 1;
             } else {
+                logmsg("A3: FALHA ao abrir faixa");
                 a_fail = 1;
             }
         }
@@ -318,10 +335,12 @@ static vita2d_pgf *pgf = NULL;
 #define C_TRACK   RGBA8(72, 72, 74, 255)
 
 static void draw_text(int x, int y, unsigned int color, float scale, const char *s) {
+    if (!pgf) return;
     vita2d_pgf_draw_text(pgf, x, y, color, scale, s);
 }
 
 static int text_w(float scale, const char *s) {
+    if (!pgf) return 0;
     return vita2d_pgf_text_width(pgf, scale, s);
 }
 
@@ -439,6 +458,7 @@ static void draw_ui(void) {
 /* ------------------------------------------------------------------ */
 static void play_index(int i) {
     if (i < 0 || i >= ntracks) return;
+    logmsg(tracks[i].path);
     cur = i;
     sel = i;
     paused = 0;
@@ -476,6 +496,7 @@ static void keep_sel_visible(void) {
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
+    logmsg("1: inicio");
     srand((unsigned)sceKernelGetProcessTimeLow());
 
     sceIoMkdir("ux0:/data/music", 0777);
@@ -484,14 +505,18 @@ int main(int argc, char *argv[]) {
     scan_dir("uma0:/data/music", 0);
     scan_dir("uma0:/music", 0);
     if (ntracks > 1) qsort(tracks, ntracks, sizeof(Track), cmp_track);
+    logmsg("2: pastas lidas");
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     vita2d_init();
+    logmsg("3: vita2d ok");
     vita2d_set_clear_color(C_BG);
     pgf = vita2d_load_default_pgf();
+    logmsg(pgf ? "4: fonte ok" : "4: FONTE NULL");
 
     SceUID th = sceKernelCreateThread("audio", audio_thread, 0x10000100, 0x40000, 0, 0, NULL);
     if (th >= 0) sceKernelStartThread(th, 0, NULL);
+    logmsg("5: thread de audio iniciada");
 
     SceCtrlData pad, old;
     memset(&pad, 0, sizeof(pad));
