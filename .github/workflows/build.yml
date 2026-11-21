@@ -1,0 +1,38 @@
+name: Compilar VPK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+    defaults:
+      run:
+        working-directory: MusicaVita
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Baixar os decodificadores de audio
+        run: |
+          mkdir -p src/deps
+          cd src/deps
+          for f in https://raw.githubusercontent.com/mackron/dr_libs/master/dr_mp3.h \
+                   https://raw.githubusercontent.com/mackron/dr_libs/master/dr_flac.h \
+                   https://raw.githubusercontent.com/mackron/dr_libs/master/dr_wav.h \
+                   https://raw.githubusercontent.com/nothings/stb/master/stb_vorbis.c; do
+            (command -v curl >/dev/null 2>&1 && curl -fsSL -O "$f") || wget -q "$f"
+          done
+          ls -la
+
+      - name: Compilar
+        run: |
+          cmake -S . -B build
+          cmake --build build -j2
+
+      - name: Guardar o VPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MusicaVita-VPK
+          path: MusicaVita/build/*.vpk
