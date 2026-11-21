@@ -2,6 +2,9 @@
  * Música Vita - player de músicas para PS Vita (MP3, OGG, FLAC, WAV)
  * Pasta das músicas: ux0:/data/music (também procura em ux0:/music e uma memória uma0:)
  * Controles: botões físicos e tela de toque.
+ *
+ * Áudio: uma thread DECODIFICA e reamostra para 48 kHz num buffer circular;
+ * outra thread só TOCA esse buffer. Assim a decodificação nunca atrasa a saída.
  */
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
@@ -32,9 +35,19 @@
 #undef STB_VORBIS_HEADER_ONLY
 
 #define OUT_RATE 48000
-#define GRAIN 1024
+#define GRAIN 2048            /* quadros enviados por vez à saída de áudio */
 #define MAX_TRACKS 5000
-#define SRC_CHUNK 1152   /* menor = decodificação distribuída, sem "engasgos" */
+#define SRC_CHUNK 1152        /* quadros lidos por vez do decodificador */
+#define RING_FRAMES 65536     /* buffer circular (~1,4 s), potência de 2 */
+#define RING_MASK (RING_FRAMES - 1)
+#define FILL_BLOCK 2048       /* quadros produzidos por passada */
+
+#ifndef SCE_KERNEL_CPU_MASK_USER_1
+#define SCE_KERNEL_CPU_MASK_USER_1 0x20000
+#endif
+#ifndef SCE_KERNEL_CPU_MASK_USER_2
+#define SCE_KERNEL_CPU_MASK_USER_2 0x40000
+#endif
 
 unsigned int _newlib_heap_size_user = 64 * 1024 * 1024;
 
@@ -44,6 +57,7 @@ unsigned int _newlib_heap_size_user = 64 * 1024 * 1024;
 typedef struct {
     char *path;
     const char *name;
+    char *disp; /* nome já cortado para caber na tela (calculado uma vez) */
 } Track;
 
 static Track *tracks = NULL;
@@ -60,6 +74,7 @@ static void add_track(const char *path) {
     Track *t = realloc(tracks, sizeof(Track) * (ntracks + 1));
     if (!t) return;
     tracks = t;
+    tracks[ntracks].disp = NULL;
     tracks[ntracks].path = strdup(path);
     if (!tracks[ntracks].path) return;
     const char *s = strrchr(tracks[ntracks].path, '/');
@@ -188,7 +203,7 @@ static void dec_seek(Dec *d, uint64_t frame) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Thread de áudio                                                      */
+/* Áudio: thread decodificadora + thread de saída                       */
 /* ------------------------------------------------------------------ */
 static volatile int req_load = -1;    /* índice da faixa a carregar */
 static volatile int req_seek_s = -1;  /* posição (segundos) para ir */
@@ -202,25 +217,31 @@ static volatile uint32_t a_rate = 0;
 static volatile uint64_t a_played = 0;
 static volatile uint64_t a_total = 0;
 
+static volatile uint64_t pos_base = 0;   /* posição (quadros da fonte) onde o buffer recomeçou */
+static volatile int flush_req = 0;       /* decodificadora pede para esvaziar o buffer */
+static volatile int dec_eof = 0;         /* decodificadora terminou a faixa */
+
+static int16_t ring[RING_FRAMES * 2];
+static volatile uint32_t rd = 0, wr = 0; /* em quadros, só crescem */
+
 static int16_t sbuf[(SRC_CHUNK + 16) * 2];
 static int16_t outbuf[GRAIN * 2] __attribute__((aligned(64)));
 
-static int audio_thread(SceSize args, void *argp) {
+/* decodificadora pede para a thread de saída esvaziar o buffer e espera */
+static void flush_ring(void) {
+    flush_req = 1;
+    while (flush_req && !quit_flag && !a_port_err) sceKernelDelayThread(1000);
+    flush_req = 0;
+}
+
+static int decoder_thread(SceSize args, void *argp) {
     (void)args;
     (void)argp;
-    int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
-    if (port < 0) {
-        a_port_err = 1;
-        return 0;
-    }
-    int vols[2] = {32768, 32768};
-    sceAudioOutSetVolume(port, 3, vols);
-
     Dec dec;
     memset(&dec, 0, sizeof(dec));
-    int open = 0, eof = 0;
+    int open = 0, eof = 0, same = 0;
     size_t sn = 0;
-    double spos = 0.0;
+    double spos = 0.0, ratio = 1.0;
 
     while (!quit_flag) {
         int idx = req_load;
@@ -233,22 +254,26 @@ static int audio_thread(SceSize args, void *argp) {
             a_playing = 0;
             a_ended = 0;
             a_fail = 0;
+            dec_eof = 0;
             if (idx < ntracks && dec_open(&dec, tracks[idx].path)) {
                 open = 1;
                 eof = 0;
                 sn = 0;
                 spos = 0.0;
-                a_played = 0;
+                same = (dec.rate == OUT_RATE);
+                ratio = (double)dec.rate / (double)OUT_RATE;
                 a_rate = dec.rate;
                 a_total = dec.total;
+                pos_base = 0;
+                flush_ring();
                 a_playing = 1;
             } else {
                 a_fail = 1;
             }
         }
 
-        if (!open || paused) {
-            sceKernelDelayThread(15000);
+        if (!open) {
+            sceKernelDelayThread(10000);
             continue;
         }
 
@@ -261,49 +286,125 @@ static int audio_thread(SceSize args, void *argp) {
             sn = 0;
             spos = 0.0;
             eof = 0;
-            a_played = target;
+            pos_base = target;
+            flush_ring();
         }
 
-        double ratio = (double)dec.rate / (double)OUT_RATE;
+        uint32_t used = wr - rd;
+        if (used > RING_FRAMES) used = RING_FRAMES;
+        if (RING_FRAMES - used < FILL_BLOCK) {
+            sceKernelDelayThread(5000); /* buffer cheio: espera */
+            continue;
+        }
+
+        uint32_t w = wr;
         int i = 0;
-        for (; i < GRAIN; i++) {
+        size_t need = same ? 1 : 2;
+        for (; i < FILL_BLOCK; i++) {
             size_t ix = (size_t)spos;
-            if (ix + 1 >= sn) {
+            while (ix + need > sn) {
+                if (eof) break;
                 size_t keep = (sn > ix) ? (sn - ix) : 0;
                 if (keep) memmove(sbuf, sbuf + ix * 2, keep * 2 * sizeof(int16_t));
                 spos -= (double)ix;
                 sn = keep;
-                if (!eof) {
-                    size_t r = dec_read(&dec, sbuf + sn * 2, SRC_CHUNK);
-                    if (r == 0) {
-                        eof = 1;
-                    } else {
-                        sn += r;
-                        a_played += r;
-                    }
-                }
+                size_t r = dec_read(&dec, sbuf + sn * 2, SRC_CHUNK);
+                if (r == 0) eof = 1;
+                else sn += r;
                 ix = (size_t)spos;
-                if (ix + 1 >= sn) break;
             }
-            double f = spos - (double)ix;
-            outbuf[i * 2] = (int16_t)(sbuf[ix * 2] * (1.0 - f) + sbuf[(ix + 1) * 2] * f);
-            outbuf[i * 2 + 1] = (int16_t)(sbuf[ix * 2 + 1] * (1.0 - f) + sbuf[(ix + 1) * 2 + 1] * f);
-            spos += ratio;
+            if (ix + need > sn) break; /* fim do arquivo */
+            int16_t *o = &ring[((w + (uint32_t)i) & RING_MASK) * 2];
+            if (same) {
+                o[0] = sbuf[ix * 2];
+                o[1] = sbuf[ix * 2 + 1];
+                spos += 1.0;
+            } else {
+                double f = spos - (double)ix;
+                o[0] = (int16_t)(sbuf[ix * 2] * (1.0 - f) + sbuf[(ix + 1) * 2] * f);
+                o[1] = (int16_t)(sbuf[ix * 2 + 1] * (1.0 - f) + sbuf[(ix + 1) * 2 + 1] * f);
+                spos += ratio;
+            }
         }
-        int ended = (i < GRAIN);
-        for (int k = i; k < GRAIN; k++) {
-            outbuf[k * 2] = 0;
-            outbuf[k * 2 + 1] = 0;
-        }
-        sceAudioOutOutput(port, outbuf);
-        if (ended) {
+        __sync_synchronize();
+        wr = w + (uint32_t)i;
+        if (i < FILL_BLOCK) {
             dec_close(&dec);
             open = 0;
-            a_playing = 0;
-            a_ended = 1;
+            __sync_synchronize();
+            dec_eof = 1;
         }
     }
     if (open) dec_close(&dec);
+    return 0;
+}
+
+static int audio_thread(SceSize args, void *argp) {
+    (void)args;
+    (void)argp;
+    int port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, GRAIN, OUT_RATE, SCE_AUDIO_OUT_MODE_STEREO);
+    if (port < 0) {
+        a_port_err = 1;
+        return 0;
+    }
+    int vols[2] = {32768, 32768};
+    sceAudioOutSetVolume(port, 3, vols);
+
+    uint64_t out_played = 0;
+
+    while (!quit_flag) {
+        if (flush_req) {
+            rd = wr;
+            out_played = 0;
+            __sync_synchronize();
+            flush_req = 0;
+        }
+
+        int finished = 0;
+        int filled = 0;
+        if (a_playing && !paused) {
+            int eofnow = dec_eof;
+            __sync_synchronize();
+            int32_t avail = (int32_t)(wr - rd);
+            if (avail < 0) {
+                rd = wr;
+                avail = 0;
+            }
+            int n = 0;
+            if (avail >= GRAIN) n = GRAIN;
+            else if (eofnow) {
+                n = avail;
+                finished = 1;
+            }
+            if (n > 0 || finished) {
+                uint32_t r = rd;
+                for (int k = 0; k < n; k++) {
+                    uint32_t ix = (r + (uint32_t)k) & RING_MASK;
+                    outbuf[k * 2] = ring[ix * 2];
+                    outbuf[k * 2 + 1] = ring[ix * 2 + 1];
+                }
+                for (int k = n; k < GRAIN; k++) {
+                    outbuf[k * 2] = 0;
+                    outbuf[k * 2 + 1] = 0;
+                }
+                rd = r + (uint32_t)n;
+                out_played += (uint64_t)n;
+                filled = 1;
+                if (a_rate) {
+                    a_played = pos_base + (uint64_t)((double)out_played * (double)a_rate / (double)OUT_RATE);
+                }
+            }
+        }
+        if (!filled) memset(outbuf, 0, sizeof(outbuf)); /* pausa, carregando ou buffer vazio */
+
+        sceAudioOutOutput(port, outbuf);
+
+        if (finished) {
+            a_playing = 0;
+            dec_eof = 0;
+            a_ended = 1;
+        }
+    }
     sceAudioOutReleasePort(port);
     return 0;
 }
@@ -396,6 +497,9 @@ static void draw_button(int i, const char *label, int active, float scale) {
 
 static void draw_ui(void) {
     char buf[320], tmp[320];
+    static int title_cur = -2;
+    static char title_buf[320];
+
     vita2d_start_drawing();
     vita2d_clear_screen();
 
@@ -415,8 +519,11 @@ static void draw_ui(void) {
             int ry = LIST_Y + r * ROW_H;
             if (i == sel) vita2d_draw_rectangle(24, ry, 912, ROW_H - 2, C_SEL);
             if (i == cur) vita2d_draw_fill_circle(44, ry + ROW_H / 2 - 1, 5, C_ACCENT);
-            fit_name(tracks[i].name, 0.95f, 830, buf, sizeof(buf));
-            draw_text(62, ry + 22, (i == cur) ? C_ACCENT : C_TEXT, 0.95f, buf);
+            if (!tracks[i].disp) {
+                fit_name(tracks[i].name, 0.95f, 830, buf, sizeof(buf));
+                tracks[i].disp = strdup(buf);
+            }
+            draw_text(62, ry + 22, (i == cur) ? C_ACCENT : C_TEXT, 0.95f, tracks[i].disp ? tracks[i].disp : "");
         }
         /* barra de rolagem */
         if (ntracks > ROWS) {
@@ -433,17 +540,21 @@ static void draw_ui(void) {
     if (a_port_err) {
         draw_text(32, 400, RGBA8(255, 69, 58, 255), 1.0f, "Não foi possível abrir a saída de áudio.");
     } else if (cur >= 0 && cur < ntracks) {
-        fit_name(tracks[cur].name, 1.05f, 640, buf, sizeof(buf));
-        draw_text(32, 400, C_TEXT, 1.05f, buf);
+        if (title_cur != cur) {
+            fit_name(tracks[cur].name, 1.05f, 640, title_buf, sizeof(title_buf));
+            title_cur = cur;
+        }
+        draw_text(32, 400, C_TEXT, 1.05f, title_buf);
         snprintf(tmp, sizeof(tmp), "%s", paused ? "Pausado" : (a_playing ? "Tocando" : "Parado"));
         draw_text(928 - text_w(0.85f, tmp), 396, C_DIM, 0.85f, tmp);
 
         uint32_t rate = a_rate ? a_rate : 1;
-        int el = (int)(a_played / rate);
+        uint64_t played = a_played;
+        int el = (int)(played / rate);
         uint64_t total = a_total;
         vita2d_draw_rectangle(BAR_X, BAR_Y, BAR_W, 8, C_TRACK);
         if (total > 0) {
-            int w = (int)((double)BAR_W * (double)a_played / (double)total);
+            int w = (int)((double)BAR_W * (double)played / (double)total);
             if (w < 0) w = 0;
             if (w > BAR_W) w = BAR_W;
             vita2d_draw_rectangle(BAR_X, BAR_Y, w, 8, C_ACCENT);
@@ -592,7 +703,7 @@ int main(int argc, char *argv[]) {
     (void)argv;
     srand((unsigned)sceKernelGetProcessTimeLow());
 
-    /* clock maior = decodificação mais folgada (menos "picotes") */
+    /* clock maior = decodificação mais folgada */
     scePowerSetArmClockFrequency(444);
     scePowerSetBusClockFrequency(222);
     scePowerSetGpuClockFrequency(222);
@@ -611,8 +722,12 @@ int main(int argc, char *argv[]) {
     vita2d_set_clear_color(C_BG);
     pgf = vita2d_load_default_pgf();
 
-    /* prioridade mais alta que a thread principal para o áudio não falhar */
-    SceUID th = sceKernelCreateThread("audio", audio_thread, 0x60, 0x40000, 0, 0, NULL);
+    /* cada thread de áudio em seu próprio núcleo; se falhar, tenta sem afinidade */
+    SceUID th_dec = sceKernelCreateThread("decoder", decoder_thread, 0x60, 0x40000, 0, SCE_KERNEL_CPU_MASK_USER_2, NULL);
+    if (th_dec < 0) th_dec = sceKernelCreateThread("decoder", decoder_thread, 0x60, 0x40000, 0, 0, NULL);
+    SceUID th = sceKernelCreateThread("audio", audio_thread, 0x40, 0x10000, 0, SCE_KERNEL_CPU_MASK_USER_1, NULL);
+    if (th < 0) th = sceKernelCreateThread("audio", audio_thread, 0x40, 0x10000, 0, 0, NULL);
+    if (th_dec >= 0) sceKernelStartThread(th_dec, 0, NULL);
     if (th >= 0) sceKernelStartThread(th, 0, NULL);
 
     SceCtrlData pad, old;
@@ -708,6 +823,7 @@ int main(int argc, char *argv[]) {
     }
 
     quit_flag = 1;
+    if (th_dec >= 0) sceKernelWaitThreadEnd(th_dec, NULL, NULL);
     if (th >= 0) sceKernelWaitThreadEnd(th, NULL, NULL);
     if (screen_off) scePowerRequestDisplayOn();
     if (pgf) vita2d_free_pgf(pgf);
