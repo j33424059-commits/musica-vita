@@ -29,7 +29,7 @@ set(MV_STUB_NAMES
   SceDisplay SceGxm SceSysmodule SceCtrl ScePgf ScePvf SceCommonDialog
   SceAudio SceAppUtil SceAppMgr SceSharedFb
   SceLibKernel SceThreadmgr SceIofilemgr SceProcessmgr SceSysmem
-  ScePower
+  ScePower SceTouch
 )
 set(MV_STUBS "")
 foreach(n ${MV_STUB_NAMES})
